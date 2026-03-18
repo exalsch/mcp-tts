@@ -241,6 +241,13 @@ type SayTTSParams struct {
 	Voice *string `json:"voice,omitempty" mcp:"Voice to use for speech synthesis (e.g. 'Alex', 'Samantha', 'Victoria')"`
 }
 
+// SAPITTSParams mirrors SayTTSParams for Windows SAPI TTS.
+type SAPITTSParams struct {
+	Text  string  `json:"text" mcp:"The text to speak aloud"`
+	Rate  *int    `json:"rate,omitempty" mcp:"Speech rate in words per minute (50-500, default: 200)"`
+	Voice *string `json:"voice,omitempty" mcp:"Voice to use for speech synthesis"`
+}
+
 type ElevenLabsTTSParams struct {
 	Text string `json:"text" mcp:"The text to convert to speech using ElevenLabs API"`
 }
@@ -314,6 +321,7 @@ var rootCmd = &cobra.Command{
 Provides multiple text-to-speech services via MCP protocol:
 
 • say_tts - Uses macOS built-in 'say' command (macOS only)
+• sapi_tts - Uses Windows SAPI text-to-speech engine (Windows only)
 • elevenlabs_tts - Uses ElevenLabs API for high-quality speech synthesis
 • google_tts - Uses Google's Gemini TTS models for natural speech
 • openai_tts - Uses OpenAI's TTS API with various voice options
@@ -537,6 +545,115 @@ Designed to be used with the MCP (Model Context Protocol).`,
 					log.Info("Say command cancelled by user")
 					return textResult("Say command cancelled"), nil, nil
 				}
+			})
+		}
+
+		if runtime.GOOS == "windows" {
+			// Windows icon (stylized window)
+			windowsIcon := mcp.Icon{
+				Source:   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48cGF0aCBmaWxsPSIjMDA3OEQ0IiBkPSJNMCAxMi4wMDJsMTAuMTMtMS40MDRWMy4wMDRMMCAxLjYwMnYxMC40em0xMC4xMy0xLjQwNGwxMy44Ny0xLjkyVjBsLTEzLjg3IDEuNjAydjkuMDM2em0wIDIuNDA0djkuMDM2TDI0IDI0VjEzLjA4MmwtMTMuODctMS45MnYyLjg0em0tMTAuMTMgMS40MDR2MTAuNGwxMC4xMy0xLjQwNFYxNC40MDZMMCA1LjYwMnoiLz48L3N2Zz4=",
+				MIMEType: "image/svg+xml",
+				Sizes:    []string{"24x24"},
+			}
+
+			sapiTool := &mcp.Tool{
+				Name:        "sapi_tts",
+				Title:       "Windows SAPI",
+				Description: "Speaks the provided text out loud using the Windows SAPI text-to-speech engine",
+				InputSchema: buildSAPITTSSchema(),
+				Icons:       []mcp.Icon{windowsIcon},
+				Annotations: &mcp.ToolAnnotations{
+					Title:          "Windows Text-to-Speech",
+					ReadOnlyHint:   false,
+					IdempotentHint: true,
+				},
+			}
+
+			mcp.AddTool(s, sapiTool, func(ctx context.Context, req *mcp.CallToolRequest, input SAPITTSParams) (*mcp.CallToolResult, any, error) {
+				select {
+				case <-ctx.Done():
+					return textResult("Request cancelled"), nil, nil
+				default:
+				}
+
+				log.Debug("SAPI tool called", "params", input)
+
+				text := input.Text
+				if text == "" {
+					return errorResult("Error: Empty text provided"), nil, nil
+				}
+
+				// Elicit settings if not provided
+				if input.Voice == nil && input.Rate == nil {
+					content, result, stop := maybeElicitContent(
+						ctx,
+						req,
+						"elicit Windows SAPI settings",
+						"Configure Windows SAPI settings (or accept defaults):",
+						sapiSettingsSchema(),
+					)
+					if stop {
+						return result, nil, nil
+					}
+					applySAPISettings(&input, content)
+				}
+
+				release, err := acquireTTSLock(ctx)
+				if err != nil {
+					log.Info("Request cancelled while waiting for TTS lock")
+					return textResult("Request cancelled while waiting for TTS"), nil, nil
+				}
+				defer release()
+
+				// Validate voice if specified
+				if input.Voice != nil && *input.Voice != "" {
+					installed, err := IsSAPIVoiceInstalled(*input.Voice)
+					if err != nil {
+						log.Warn("Failed to check SAPI voice availability", "error", err, "voice", *input.Voice)
+					} else if !installed {
+						return errorResult(SAPIVoiceNotInstalledError(*input.Voice)), nil, nil
+					}
+				}
+
+				var savedPath string
+				willPlay := true
+
+				if shouldSave() && !shouldPlay() {
+					// Save only mode
+					savedPath = sapiSavePath(text)
+					if err := speakSAPI(ctx, text, input.Rate, input.Voice, savedPath); err != nil {
+						if ctx.Err() != nil {
+							return textResult("SAPI speech cancelled"), nil, nil
+						}
+						return errorResult(fmt.Sprintf("Error: SAPI TTS failed: %v", err)), nil, nil
+					}
+					willPlay = false
+				} else if shouldSave() {
+					// Save and play mode - save first, then play
+					savedPath = sapiSavePath(text)
+					if err := speakSAPI(ctx, text, input.Rate, input.Voice, savedPath); err != nil {
+						if ctx.Err() != nil {
+							return textResult("SAPI speech cancelled"), nil, nil
+						}
+						return errorResult(fmt.Sprintf("Error: SAPI TTS failed: %v", err)), nil, nil
+					}
+					// Also speak aloud
+					if err := speakSAPI(ctx, text, input.Rate, input.Voice, ""); err != nil {
+						log.Warn("Failed to play SAPI audio", "error", err)
+						willPlay = false
+					}
+				} else {
+					// Play only mode (default)
+					if err := speakSAPI(ctx, text, input.Rate, input.Voice, ""); err != nil {
+						if ctx.Err() != nil {
+							return textResult("SAPI speech cancelled"), nil, nil
+						}
+						return errorResult(fmt.Sprintf("Error: SAPI TTS failed: %v", err)), nil, nil
+					}
+				}
+
+				log.Info("Speaking text completed", "text", text)
+				return textResult(formatSaveResult(text, savedPath, willPlay)), nil, nil
 			})
 		}
 

@@ -267,16 +267,48 @@ func openAISettingsSchema() map[string]any {
 	}
 }
 
+func sapiSettingsSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"voice": map[string]any{
+				"type":        "string",
+				"title":       "Voice",
+				"description": "Windows SAPI voice (e.g. Microsoft David, Microsoft Zira)",
+			},
+			"rate": map[string]any{
+				"type":        "integer",
+				"title":       "Speech Rate (WPM)",
+				"description": "Words per minute, 50-500 (default: 200)",
+			},
+		},
+	}
+}
+
 func settingsSchemaForProvider(providerID string) map[string]any {
 	switch providerID {
 	case ProviderSay:
 		return saySettingsSchema()
+	case ProviderSAPI:
+		return sapiSettingsSchema()
 	case ProviderGoogle:
 		return googleSettingsSchema()
 	case ProviderOpenAI:
 		return openAISettingsSchema()
 	default:
 		return nil
+	}
+}
+
+func applySAPISettings(input *SAPITTSParams, content map[string]any) {
+	if input == nil {
+		return
+	}
+	if v := elicitString(content, "voice"); v != "" {
+		input.Voice = &v
+	}
+	if r, ok := elicitInt(content, "rate"); ok {
+		input.Rate = &r
 	}
 }
 
@@ -317,6 +349,20 @@ func applyOpenAISettings(input *OpenAITTSParams, content map[string]any) {
 	if s, ok := elicitFloat64(content, "speed"); ok {
 		input.Speed = &s
 	}
+}
+
+func sapiRecommendationArgs(input SAPITTSParams) map[string]any {
+	args := map[string]any{
+		"text": input.Text,
+		"rate": DefaultSayRate,
+	}
+	if input.Rate != nil {
+		args["rate"] = *input.Rate
+	}
+	if input.Voice != nil && *input.Voice != "" {
+		args["voice"] = *input.Voice
+	}
+	return args
 }
 
 func sayRecommendationArgs(input SayTTSParams) map[string]any {
@@ -376,6 +422,10 @@ func providerRecommendationArgs(providerID, text string, content map[string]any)
 		input := SayTTSParams{Text: text}
 		applySaySettings(&input, content)
 		return sayRecommendationArgs(input)
+	case ProviderSAPI:
+		input := SAPITTSParams{Text: text}
+		applySAPISettings(&input, content)
+		return sapiRecommendationArgs(input)
 	case ProviderGoogle:
 		input := GoogleTTSParams{Text: text}
 		applyGoogleSettings(&input, content)

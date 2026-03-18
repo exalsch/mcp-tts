@@ -46,6 +46,35 @@ func buildSayTTSSchema() json.RawMessage {
 	return data
 }
 
+func buildSAPITTSSchema() json.RawMessage {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"text": map[string]any{
+				"type":        "string",
+				"description": "The text to speak aloud",
+			},
+			"rate": map[string]any{
+				"type":        "integer",
+				"description": "Speech rate in words per minute. RECOMMENDED: 200-250 for natural speech. (default: 200)",
+				"minimum":     50,
+				"maximum":     500,
+				"default":     200,
+			},
+			"voice": map[string]any{
+				"type":        "string",
+				"description": "Voice to use for speech synthesis. IMPORTANT: Prefer leaving this unset to use the system's default voice. Only set a specific voice if the user explicitly requests one.",
+			},
+		},
+		"required": []string{"text"},
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal sapi_tts schema: %v", err))
+	}
+	return data
+}
+
 func buildElevenLabsTTSSchema() json.RawMessage {
 	schema := map[string]any{
 		"type": "object",

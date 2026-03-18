@@ -29,6 +29,7 @@ import (
 // Provider IDs used in tool registration and elicitation routing.
 const (
 	ProviderSay        = "say_tts"
+	ProviderSAPI       = "sapi_tts"
 	ProviderElevenLabs = "elevenlabs_tts"
 	ProviderGoogle     = "google_tts"
 	ProviderOpenAI     = "openai_tts"
@@ -79,6 +80,9 @@ func availableProviders() []providerOption {
 	var providers []providerOption
 	if runtime.GOOS == "darwin" {
 		providers = append(providers, providerOption{ProviderSay, "macOS Say"})
+	}
+	if runtime.GOOS == "windows" {
+		providers = append(providers, providerOption{ProviderSAPI, "Windows SAPI"})
 	}
 	if os.Getenv("ELEVENLABS_API_KEY") != "" {
 		providers = append(providers, providerOption{ProviderElevenLabs, "ElevenLabs"})

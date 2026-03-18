@@ -18,8 +18,9 @@
 
 Adds Text-to-Speech to things like Claude Desktop and Cursor IDE.  
 
-It registers four TTS tools: 
- - `say_tts` 
+It registers five TTS tools:
+ - `say_tts` (macOS)
+ - `sapi_tts` (Windows)
  - `elevenlabs_tts`
  - `google_tts`
  - `openai_tts`
@@ -27,6 +28,10 @@ It registers four TTS tools:
 ### `say_tts`
 
 Uses the macOS `say` binary to speak the text with built-in system voices
+
+### `sapi_tts`
+
+Uses the Windows [SAPI (Speech API)](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ms723627(v=vs.85)) to speak the text with built-in system voices. Supports voice selection and rate control. Available voices depend on your Windows language packs (Settings → Time & Language → Speech → Manage voices).
 
 ### `elevenlabs_tts`
 
@@ -122,6 +127,7 @@ Files are saved with unique names: `tts_{timestamp}_{hash}.{ext}`
 | Provider | Format |
 |----------|--------|
 | macOS say | AIFF |
+| Windows SAPI | WAV |
 | ElevenLabs | MP3 |
 | Google TTS | WAV |
 | OpenAI TTS | MP3 |
@@ -142,6 +148,7 @@ TTS (text-to-speech) MCP Server.
 Provides multiple text-to-speech services via MCP protocol:
 
 • say_tts - Uses macOS built-in 'say' command (macOS only)
+• sapi_tts - Uses Windows SAPI text-to-speech engine (Windows only)
 • elevenlabs_tts - Uses ElevenLabs API for high-quality speech synthesis
 • google_tts - Uses Google's Gemini TTS models for natural speech
 • openai_tts - Uses OpenAI's TTS API with various voice options
@@ -391,7 +398,52 @@ The skill triggers automatically after:
 - **Issue resolved** - When a bug fix or error is resolved
 - **Summary generated** - When completing a major task
 
-Providers fallback in order: `google` → `openai` → `elevenlabs` → `say` (macOS). If a provider fails due to missing API keys, it's marked unavailable and skipped in future attempts.
+Providers fallback in order: `google` → `openai` → `elevenlabs` → `say` (macOS) / `sapi` (Windows). If a provider fails due to missing API keys, it's marked unavailable and skipped in future attempts.
+
+## Building
+
+### Prerequisites
+
+- [Go](https://go.dev/dl/) 1.25 or later
+- [GoReleaser](https://goreleaser.com/install/) (for release builds)
+
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/blacktop/mcp-tts.git
+cd mcp-tts
+
+# Build
+CGO_ENABLED=0 go build -o mcp-tts .
+
+# Or install directly
+go install github.com/blacktop/mcp-tts@latest
+```
+
+### Cross-Compile
+
+```bash
+# Build for macOS (Intel + Apple Silicon universal binary)
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o mcp-tts-darwin-amd64 .
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mcp-tts-darwin-arm64 .
+
+# Build for Windows
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mcp-tts.exe .
+```
+
+### Release Build (via GoReleaser)
+
+Tagged pushes (`v*.*.*`) automatically trigger the [GoReleaser GitHub Action](.github/workflows/goreleaser.yml) which builds binaries for macOS (universal) and Windows, creates a GitHub Release, and updates the Homebrew tap.
+
+To create a release manually:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Or trigger the workflow manually from the GitHub Actions tab.
 
 ## License
 
