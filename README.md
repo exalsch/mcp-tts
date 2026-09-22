@@ -18,12 +18,13 @@
 
 Adds Text-to-Speech to things like Claude Desktop and Cursor IDE.  
 
-It registers five TTS tools:
+It registers six TTS tools:
  - `say_tts` (macOS)
  - `sapi_tts` (Windows)
  - `elevenlabs_tts`
  - `google_tts`
  - `openai_tts`
+ - `pocket_tts` (local server)
 
 ### `say_tts`
 
@@ -170,6 +171,23 @@ Flags:
   -v, --verbose                    Enable verbose debug logging
 ```
 
+### `pocket_tts`
+
+Uses [Kyutai Pocket TTS](https://github.com/kyutai-labs/pocket-tts), a 100M-parameter neural TTS model that runs on the CPU, through a local `pocket-tts serve` process. No API key, no network, and a far more natural voice than the system engines.
+
+The model takes several seconds to load, so mcp-tts does not start it per call. Keep a server running and point `POCKET_TTS_URL` at it:
+
+```bash
+uv tool install pocket-tts
+pocket-tts serve --host 127.0.0.1 --port 8765 --language english
+```
+
+Audio is streamed: playback starts on the first chunk (~0,2 s) while the rest is still being generated. Voices are the 21 built-in English ones (`alba` by default, `marius`, `jean`, `vera`, ...).
+
+If the server is not reachable, or answers with a 5xx, the call falls back to Windows SAPI on Windows and says so in the result, so a spoken notification is never silently lost. Set `POCKET_TTS_FALLBACK=none` to get an error instead.
+
+> On hybrid Intel CPUs (P-cores + E-cores), pin the server to the P-cores. Windows tends to schedule a background process onto the E-cores, where Pocket TTS runs slower than real time. Pinned to the P-cores of an i7-13800H it runs at about 2x real time.
+
 ### Configuration
 
 #### [Claude Desktop](https://claude.ai/download)
@@ -246,6 +264,9 @@ Or manually add to `~/.gemini/settings.json` (or `.gemini/settings.json` in proj
 - `GOOGLE_AI_API_KEY` or `GEMINI_API_KEY`: Your Google AI API key (required for `google_tts`)
 - `OPENAI_API_KEY`: Your OpenAI API key (required for `openai_tts`)
 - `OPENAI_TTS_INSTRUCTIONS`: Custom voice instructions for OpenAI TTS (optional, e.g., "Speak in a cheerful and positive tone")
+- `POCKET_TTS_URL`: Base URL of a running `pocket-tts serve` (optional, defaults to `http://127.0.0.1:8000`). Setting it also makes `pocket_tts` the first choice of the interactive `tts` tool
+- `POCKET_TTS_VOICE`: Default Pocket TTS voice when the call does not name one (optional, defaults to the server's default voice)
+- `POCKET_TTS_FALLBACK`: Set to "none" to disable the Windows SAPI fallback when the Pocket TTS server is unavailable (optional)
 - `MCP_TTS_SUPPRESS_SPEAKING_OUTPUT`: Set to "true" to suppress "Speaking:" output (optional)
 - `MCP_TTS_ALLOW_CONCURRENT`: Set to "true" to allow concurrent TTS operations (optional, defaults to sequential)
 - `MCP_TTS_OUTPUT_DIR`: Directory to save audio files (optional)

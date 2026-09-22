@@ -624,7 +624,7 @@ func TestMCPIntegration_ToolsList(t *testing.T) {
 		toolNames = append(toolNames, name)
 	}
 
-	expectedTools := []string{"elevenlabs_tts", "google_tts", "openai_tts", "tts"}
+	expectedTools := []string{"elevenlabs_tts", "google_tts", "openai_tts", "pocket_tts", "tts"}
 
 	// On macOS, we should also have say_tts
 	if os.Getenv("GITHUB_ACTIONS") == "" { // Not in CI

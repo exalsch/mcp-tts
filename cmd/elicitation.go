@@ -285,6 +285,20 @@ func sapiSettingsSchema() map[string]any {
 	}
 }
 
+func pocketSettingsSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"voice": map[string]any{
+				"type":        "string",
+				"title":       "Voice",
+				"description": "Pocket TTS voice (default: the server's default voice)",
+				"enum":        PocketVoices,
+			},
+		},
+	}
+}
+
 func settingsSchemaForProvider(providerID string) map[string]any {
 	switch providerID {
 	case ProviderSay:
@@ -295,6 +309,8 @@ func settingsSchemaForProvider(providerID string) map[string]any {
 		return googleSettingsSchema()
 	case ProviderOpenAI:
 		return openAISettingsSchema()
+	case ProviderPocket:
+		return pocketSettingsSchema()
 	default:
 		return nil
 	}
@@ -349,6 +365,23 @@ func applyOpenAISettings(input *OpenAITTSParams, content map[string]any) {
 	if s, ok := elicitFloat64(content, "speed"); ok {
 		input.Speed = &s
 	}
+}
+
+func applyPocketSettings(input *PocketTTSParams, content map[string]any) {
+	if input == nil {
+		return
+	}
+	if v := elicitString(content, "voice"); v != "" {
+		input.Voice = &v
+	}
+}
+
+func pocketRecommendationArgs(input PocketTTSParams) map[string]any {
+	args := map[string]any{"text": input.Text}
+	if input.Voice != nil && *input.Voice != "" {
+		args["voice"] = *input.Voice
+	}
+	return args
 }
 
 func sapiRecommendationArgs(input SAPITTSParams) map[string]any {
@@ -434,6 +467,10 @@ func providerRecommendationArgs(providerID, text string, content map[string]any)
 		input := OpenAITTSParams{Text: text}
 		applyOpenAISettings(&input, content)
 		return openAIRecommendationArgs(input)
+	case ProviderPocket:
+		input := PocketTTSParams{Text: text}
+		applyPocketSettings(&input, content)
+		return pocketRecommendationArgs(input)
 	default:
 		return map[string]any{"text": text}
 	}

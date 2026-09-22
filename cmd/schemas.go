@@ -158,3 +158,26 @@ func buildOpenAITTSSchema() json.RawMessage {
 	}
 	return data
 }
+
+func buildPocketTTSSchema() json.RawMessage {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"text": map[string]any{
+				"type":        "string",
+				"description": "The text to speak aloud (English)",
+			},
+			"voice": map[string]any{
+				"type":        "string",
+				"description": "Built-in Pocket TTS voice. IMPORTANT: Prefer leaving this unset to use the server's default voice. Only set a specific voice if the user explicitly requests one.",
+				"enum":        PocketVoices,
+			},
+		},
+		"required": []string{"text"},
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal pocket_tts schema: %v", err))
+	}
+	return data
+}

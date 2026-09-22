@@ -33,6 +33,7 @@ const (
 	ProviderElevenLabs = "elevenlabs_tts"
 	ProviderGoogle     = "google_tts"
 	ProviderOpenAI     = "openai_tts"
+	ProviderPocket     = "pocket_tts"
 )
 
 // Default values for provider-specific settings.
@@ -43,6 +44,8 @@ const (
 	DefaultOpenAIVoice = "alloy"
 	DefaultOpenAIModel = "gpt-4o-mini-tts-2025-12-15"
 	DefaultOpenAISpeed = 1.0
+	// DefaultPocketURL is where `pocket-tts serve` listens unless told otherwise.
+	DefaultPocketURL = "http://127.0.0.1:8000"
 )
 
 // Voice and model lists shared by tool schemas (schemas.go) and
@@ -69,6 +72,14 @@ var (
 	OpenAIModels = []string{
 		"gpt-4o-mini-tts-2025-12-15", "tts-1", "tts-1-hd",
 	}
+	// PocketVoices are the built-in voices of Pocket TTS's English model. The other languages
+	// ship their own voices (juergen, estelle, ...) that only work with a server started with
+	// that language, so they are not offered here.
+	PocketVoices = []string{
+		"alba", "anna", "azelma", "bill_boerst", "caro_davy", "charles", "cosette",
+		"eponine", "eve", "fantine", "george", "jane", "javert", "jean",
+		"marius", "mary", "michael", "paul", "peter_yearsley", "stuart_bell", "vera",
+	}
 )
 
 type providerOption struct {
@@ -78,6 +89,11 @@ type providerOption struct {
 
 func availableProviders() []providerOption {
 	var providers []providerOption
+	// A local Pocket TTS server is opt-in. Once someone has gone to the trouble of running
+	// one it is the voice they want, so it goes first and becomes the default.
+	if os.Getenv("POCKET_TTS_URL") != "" {
+		providers = append(providers, providerOption{ProviderPocket, "Pocket TTS (local)"})
+	}
 	if runtime.GOOS == "darwin" {
 		providers = append(providers, providerOption{ProviderSay, "macOS Say"})
 	}

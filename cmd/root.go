@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -325,6 +326,7 @@ Provides multiple text-to-speech services via MCP protocol:
 • elevenlabs_tts - Uses ElevenLabs API for high-quality speech synthesis
 • google_tts - Uses Google's Gemini TTS models for natural speech
 • openai_tts - Uses OpenAI's TTS API with various voice options
+• pocket_tts - Uses a local Kyutai Pocket TTS server (neural voice, runs on the CPU)
 
 Each tool supports different voices, rates, and configuration options.
 Requires appropriate API keys for cloud-based services.
@@ -1317,6 +1319,48 @@ Designed to be used with the MCP (Model Context Protocol).`,
 				log.Info("OpenAI TTS audio playback cancelled by user")
 				return textResult("OpenAI TTS audio playback cancelled"), nil, nil
 			}
+		})
+
+		// Add Pocket TTS tool (local neural voice served by `pocket-tts serve`)
+		pocketIcon := mcp.Icon{
+			Source:   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiPjxwYXRoIGQ9Ik00IDEwdjRNOCA3djEwTTEyIDR2MTZNMTYgN3YxME0yMCAxMHY0Ii8+PC9zdmc+",
+			MIMEType: "image/svg+xml",
+			Sizes:    []string{"24x24"},
+		}
+		pocketTool := &mcp.Tool{
+			Name:  "pocket_tts",
+			Title: "Pocket TTS",
+			Description: "Speaks the provided text out loud with Kyutai Pocket TTS, a natural-sounding neural voice " +
+				"running on a local pocket-tts server (English). Falls back to Windows SAPI when the server is not running.",
+			InputSchema: buildPocketTTSSchema(),
+			Icons:       []mcp.Icon{pocketIcon},
+			Annotations: &mcp.ToolAnnotations{
+				Title:          "Pocket Text-to-Speech",
+				ReadOnlyHint:   false,
+				IdempotentHint: true,
+			},
+		}
+
+		mcp.AddTool(s, pocketTool, func(ctx context.Context, _ *mcp.CallToolRequest, input PocketTTSParams) (*mcp.CallToolResult, any, error) {
+			select {
+			case <-ctx.Done():
+				return textResult("Request cancelled"), nil, nil
+			default:
+			}
+
+			log.Debug("Pocket TTS tool called", "params", input)
+			if strings.TrimSpace(input.Text) == "" {
+				return errorResult("Error: Empty text provided"), nil, nil
+			}
+
+			release, err := acquireTTSLock(ctx)
+			if err != nil {
+				log.Info("Request cancelled while waiting for TTS lock")
+				return textResult("Request cancelled while waiting for TTS"), nil, nil
+			}
+			defer release()
+
+			return speakPocket(ctx, input), nil, nil
 		})
 
 		// Add interactive TTS tool that uses elicitation to choose provider
