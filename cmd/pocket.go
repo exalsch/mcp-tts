@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/log"
@@ -53,6 +54,51 @@ var pocketHTTPClient = &http.Client{
 		DialContext:           (&net.Dialer{Timeout: 2 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 15 * time.Second,
 	},
+}
+
+// pocketStallTimeout is how long the audio stream may go without a single byte before the
+// server counts as wedged. A healthy server generates at about twice real time, so a gap this
+// long only happens when it has stopped. Without it a server that sends its headers and then
+// hangs would block the call forever, with neither Pocket audio nor the SAPI fallback.
+var pocketStallTimeout = 10 * time.Second
+
+// pocketStalledError means the server answered but then stopped sending audio.
+type pocketStalledError struct{ after time.Duration }
+
+func (e *pocketStalledError) Error() string {
+	return fmt.Sprintf("server stalled: no audio for %s", e.after)
+}
+
+// stallReader closes the response body when no Read has returned for pocketStallTimeout,
+// which unblocks the pending Read, and reports that as a pocketStalledError.
+type stallReader struct {
+	body    io.ReadCloser
+	timeout time.Duration
+	timer   *time.Timer
+	stalled atomic.Bool
+}
+
+func newStallReader(body io.ReadCloser, timeout time.Duration) *stallReader {
+	s := &stallReader{body: body, timeout: timeout}
+	s.timer = time.AfterFunc(timeout, func() {
+		s.stalled.Store(true)
+		body.Close()
+	})
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.body.Read(p)
+	if err != nil && s.stalled.Load() {
+		return n, &pocketStalledError{after: s.timeout}
+	}
+	s.timer.Reset(s.timeout)
+	return n, err
+}
+
+func (s *stallReader) Close() error {
+	s.timer.Stop()
+	return s.body.Close()
 }
 
 // pocketUnreachableError means no HTTP response came back at all: the server is not running,
@@ -118,17 +164,22 @@ func openPocketStream(ctx context.Context, baseURL, text, voice string) (io.Read
 		return nil, 0, &pocketStatusError{code: res.StatusCode, detail: pocketErrorDetail(body)}
 	}
 
-	br := bufio.NewReader(res.Body)
+	body := newStallReader(res.Body, pocketStallTimeout)
+	br := bufio.NewReader(body)
 	sampleRate, err := readWAVHeader(br)
 	if err != nil {
-		res.Body.Close()
+		body.Close()
+		var stalled *pocketStalledError
+		if errors.As(err, &stalled) {
+			return nil, 0, stalled
+		}
 		return nil, 0, fmt.Errorf("unexpected audio from server: %w", err)
 	}
 
 	return struct {
 		io.Reader
 		io.Closer
-	}{br, res.Body}, sampleRate, nil
+	}{br, body}, sampleRate, nil
 }
 
 // pocketErrorDetail pulls FastAPI's {"detail": ...} out of an error body, or returns the body.
@@ -214,7 +265,8 @@ func pocketFallsBack(err error) bool {
 		return false
 	}
 	var unreachable *pocketUnreachableError
-	if errors.As(err, &unreachable) {
+	var stalled *pocketStalledError
+	if errors.As(err, &unreachable) || errors.As(err, &stalled) {
 		return true
 	}
 	var status *pocketStatusError
@@ -249,6 +301,9 @@ func speakPocket(ctx context.Context, input PocketTTSParams) *mcp.CallToolResult
 
 	if !shouldPlay() {
 		if _, err := io.Copy(io.Discard, pcm); err != nil {
+			if pocketFallsBack(err) {
+				return pocketSAPIFallback(ctx, text, baseURL, err)
+			}
 			return errorResult(fmt.Sprintf("Error: Pocket TTS stream interrupted: %v", err))
 		}
 		savedPath, err := saveWAV(saved.Bytes(), sampleRate, text)
@@ -282,6 +337,12 @@ func speakPocket(ctx context.Context, input PocketTTSParams) *mcp.CallToolResult
 	}
 
 	if err := stream.Err(); err != nil {
+		// A stalled server has usually played little or nothing, so say the whole text again
+		// through SAPI rather than lose the notification.
+		var stalled *pocketStalledError
+		if errors.As(err, &stalled) && pocketFallsBack(err) {
+			return pocketSAPIFallback(ctx, text, baseURL, err)
+		}
 		log.Error("Pocket TTS stream interrupted", "error", err)
 		return errorResult(fmt.Sprintf("Error: Pocket TTS stream interrupted after %.1fs: %v",
 			float64(stream.Position())/float64(sampleRate), err))

@@ -11,8 +11,10 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
@@ -78,6 +80,32 @@ func pocketServer(t *testing.T, wantVoice string, pcm []byte) *httptest.Server {
 			body = body[n:]
 		}
 	}))
+}
+
+// stallingServer answers 200, sends prefix, then goes silent without closing the connection,
+// the way a wedged pocket-tts does. Call release to let the handler return.
+func stallingServer(prefix []byte) (*httptest.Server, func()) {
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/wav")
+		w.WriteHeader(http.StatusOK)
+		w.Write(prefix)
+		w.(http.Flusher).Flush()
+		select {
+		case <-stop:
+		case <-r.Context().Done():
+		}
+	}))
+	var once sync.Once
+	return srv, func() { once.Do(func() { close(stop) }) }
+}
+
+// withStallTimeout shortens the stall timeout for one test.
+func withStallTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := pocketStallTimeout
+	pocketStallTimeout = d
+	t.Cleanup(func() { pocketStallTimeout = prev })
 }
 
 func TestReadWAVHeader(t *testing.T) {
@@ -247,6 +275,18 @@ func TestOpenPocketStream(t *testing.T) {
 		assert.False(t, pocketFallsBack(err), "POCKET_TTS_FALLBACK=none turns the fallback off")
 	})
 
+	t.Run("a server that stalls before the WAV header counts as stalled and falls back on Windows", func(t *testing.T) {
+		withStallTimeout(t, 200*time.Millisecond)
+		srv, release := stallingServer(nil)
+		defer srv.Close()
+		defer release()
+
+		_, _, err := openPocketStream(context.Background(), srv.URL, "Ready for review", "")
+		var stalled *pocketStalledError
+		require.ErrorAs(t, err, &stalled)
+		assert.Equal(t, runtime.GOOS == "windows", pocketFallsBack(err))
+	})
+
 	t.Run("a non-WAV 200 is rejected", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "<html>not audio</html>")
@@ -368,6 +408,26 @@ func TestSpeakPocket(t *testing.T) {
 		res := speakPocket(context.Background(), PocketTTSParams{Text: "Ready for review"})
 		assert.True(t, res.IsError)
 		assert.Contains(t, resultText(t, res), "server not reachable")
+	})
+
+	t.Run("a stream that stalls after the header ends instead of hanging", func(t *testing.T) {
+		withSaveOnly(t)
+		withStallTimeout(t, 200*time.Millisecond)
+		srv, release := stallingServer(append(wavHeader(24000, 1, 16, 2_000_000_000), pcm16(1, 2, 3)...))
+		defer srv.Close()
+		defer release()
+		t.Setenv("POCKET_TTS_URL", srv.URL)
+		t.Setenv("POCKET_TTS_FALLBACK", "none")
+
+		done := make(chan *mcp.CallToolResult, 1)
+		go func() { done <- speakPocket(context.Background(), PocketTTSParams{Text: "Ready for review"}) }()
+		select {
+		case res := <-done:
+			assert.True(t, res.IsError)
+			assert.Contains(t, resultText(t, res), "stalled")
+		case <-time.After(5 * time.Second):
+			t.Fatal("speakPocket hung on a stalled stream")
+		}
 	})
 
 	t.Run("a cancelled request says so", func(t *testing.T) {
