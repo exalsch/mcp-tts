@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -442,4 +443,64 @@ func TestSpeakPocket(t *testing.T) {
 		assert.False(t, res.IsError)
 		assert.Equal(t, "Pocket TTS request cancelled", resultText(t, res))
 	})
+}
+
+func TestWaitForPlayback(t *testing.T) {
+	const stall = 100 * time.Millisecond
+
+	t.Run("returns when playback ends", func(t *testing.T) {
+		done := make(chan struct{})
+		close(done)
+		if err := waitForPlayback(context.Background(), done, func() int { return 0 }, stall); err != nil {
+			t.Fatalf("got %v, want nil", err)
+		}
+	})
+
+	t.Run("reports a speaker that never drains the stream", func(t *testing.T) {
+		start := time.Now()
+		err := waitForPlayback(context.Background(), make(chan struct{}), func() int { return 42 }, stall)
+		if !errors.Is(err, errPlaybackStalled) {
+			t.Fatalf("got %v, want errPlaybackStalled", err)
+		}
+		if waited := time.Since(start); waited < stall || waited > 10*stall {
+			t.Fatalf("waited %s, want about %s", waited, stall)
+		}
+	})
+
+	t.Run("does not time out a clip that keeps playing", func(t *testing.T) {
+		done := make(chan struct{})
+		var pos atomic.Int64
+		go func() {
+			for i := 0; i < 20; i++ { // 4x the stall limit in total
+				time.Sleep(stall / 5)
+				pos.Add(1)
+			}
+			close(done)
+		}()
+		if err := waitForPlayback(context.Background(), done, func() int { return int(pos.Load()) }, stall); err != nil {
+			t.Fatalf("got %v, want nil", err)
+		}
+	})
+
+	t.Run("returns the context error on cancel", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := waitForPlayback(ctx, make(chan struct{}), func() int { return 0 }, time.Minute)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context.Canceled", err)
+		}
+	})
+}
+
+func TestPlaybackStallLimit(t *testing.T) {
+	t.Cleanup(func() { speakerStalled.Store(false) })
+
+	speakerStalled.Store(false)
+	if got := playbackStallLimit(); got <= pocketStallTimeout {
+		t.Fatalf("limit %s must be longer than the server stall timeout %s", got, pocketStallTimeout)
+	}
+	speakerStalled.Store(true)
+	if got := playbackStallLimit(); got != pocketDegradedStallLimit {
+		t.Fatalf("after a stall got %s, want %s", got, pocketDegradedStallLimit)
+	}
 }
