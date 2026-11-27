@@ -322,16 +322,31 @@ func speakPocket(ctx context.Context, input PocketTTSParams) *mcp.CallToolResult
 	playback := resampleToSpeaker(stream, rate)
 
 	done := make(chan struct{})
-	speaker.Play(beep.Seq(playback, beep.Callback(func() { close(done) })))
+	// Play takes the speaker lock. A hung audio driver can hold that lock for good, so the call
+	// must not wait on it here: the playback watchdog below is what bounds this call.
+	go speaker.Play(beep.Seq(playback, beep.Callback(func() { close(done) })))
 	log.Info("Speaking via Pocket TTS", "text", text, "voice", voice, "url", baseURL)
 
-	select {
-	case <-done:
-	case <-ctx.Done():
+	switch err := waitForPlayback(ctx, done, stream.Position, playbackStallLimit()); {
+	case err == nil:
+		speakerStalled.Store(false)
+	case errors.Is(err, errPlaybackStalled):
+		// The audio device stopped pulling samples (seen after a dock or standby device change).
+		// Give up on this clip, so the TTS locks are released and other sessions can speak.
+		speakerStalled.Store(true)
+		body.Close()
+		clearSpeaker()
+		log.Warn("Audio output stalled, falling back to Windows SAPI", "error", err)
+		note := fmt.Sprintf("The audio output of this mcp-tts process stalled (%v)", err)
+		if runtime.GOOS != "windows" || strings.EqualFold(os.Getenv("POCKET_TTS_FALLBACK"), "none") {
+			return errorResult("Error: " + note)
+		}
+		return sapiFallback(ctx, text, note+". Reconnect the tts MCP server in this session if it repeats")
+	default:
 		// Close the body first: the speaker holds its lock while Stream waits on the network,
 		// so speaker.Clear would block until the next chunk arrived.
 		body.Close()
-		speaker.Clear()
+		clearSpeaker()
 		log.Info("Pocket TTS playback cancelled by user")
 		return textResult("Pocket TTS playback cancelled")
 	}
@@ -361,8 +376,12 @@ func speakPocket(ctx context.Context, input PocketTTSParams) *mcp.CallToolResult
 // pocketSAPIFallback speaks through Windows SAPI when the Pocket TTS server is unavailable and
 // says so in the result, so the caller can tell the server needs attention.
 func pocketSAPIFallback(ctx context.Context, text, baseURL string, cause error) *mcp.CallToolResult {
-	note := fmt.Sprintf("Pocket TTS at %s unavailable (%v)", baseURL, cause)
 	log.Warn("Pocket TTS unavailable, falling back to Windows SAPI", "url", baseURL, "error", cause)
+	return sapiFallback(ctx, text, fmt.Sprintf("Pocket TTS at %s unavailable (%v)", baseURL, cause))
+}
+
+// sapiFallback speaks text through Windows SAPI and puts note, the reason, in the result.
+func sapiFallback(ctx context.Context, text, note string) *mcp.CallToolResult {
 	if err := speakSAPI(ctx, text, nil, nil, ""); err != nil {
 		if ctx.Err() != nil {
 			return textResult("SAPI speech cancelled")
@@ -370,4 +389,65 @@ func pocketSAPIFallback(ctx context.Context, text, baseURL string, cause error) 
 		return errorResult(fmt.Sprintf("Error: %s. The Windows SAPI fallback failed too: %v", note, err))
 	}
 	return textResult(formatSaveResult(text, "", true) + "\n" + note + "; spoke via Windows SAPI instead")
+}
+
+// errPlaybackStalled means the speaker stopped pulling samples before the clip had ended.
+var errPlaybackStalled = errors.New("no playback progress")
+
+// speakerStalled is set after a playback stall. While it is set the next call gives the speaker
+// only a short time to show progress, so a dead audio device costs seconds, not the full limit.
+var speakerStalled atomic.Bool
+
+// pocketDegradedStallLimit is the playback stall limit after an earlier stall.
+var pocketDegradedStallLimit = 3 * time.Second
+
+// playbackStallLimit is how long playback may show no progress. It is longer than
+// pocketStallTimeout, so that a stalled server is reported as such by the stallReader first.
+func playbackStallLimit() time.Duration {
+	if speakerStalled.Load() {
+		return pocketDegradedStallLimit
+	}
+	return pocketStallTimeout + 5*time.Second
+}
+
+// waitForPlayback waits until done is closed. It returns errPlaybackStalled when position has
+// not changed for stall, and the context error when ctx ends first.
+//
+// Without it a speaker that never drains the stream blocks the call for good. The call holds
+// the global TTS lock, so every other mcp-tts process on the machine would then wait as well.
+func waitForPlayback(ctx context.Context, done <-chan struct{}, position func() int, stall time.Duration) error {
+	tick := min(max(stall/10, 10*time.Millisecond), 500*time.Millisecond)
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+
+	last, lastMove := position(), time.Now()
+	for {
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if p := position(); p != last {
+				last, lastMove = p, time.Now()
+			} else if time.Since(lastMove) >= stall {
+				return fmt.Errorf("%w for %s", errPlaybackStalled, stall)
+			}
+		}
+	}
+}
+
+// clearSpeaker drops everything queued on the speaker. speaker.Clear takes the speaker lock,
+// which a hung audio driver may never release, so the wait for it is bounded.
+func clearSpeaker() {
+	cleared := make(chan struct{})
+	go func() {
+		speaker.Clear()
+		close(cleared)
+	}()
+	select {
+	case <-cleared:
+	case <-time.After(time.Second):
+		log.Warn("Speaker did not clear within 1s, leaving it")
+	}
 }
